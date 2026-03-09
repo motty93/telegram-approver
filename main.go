@@ -5,27 +5,36 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	neturl "net/url"
 	"os"
 	"strings"
-)
-
-var (
-	queryParameter = "?timeout=30&offset=%d"
+	"time"
 )
 
 const (
-	TELEGRAM_UPDATE_API_URL = "https://api.telegram.org/bot%s/getUpdates"
-	TELEGRAM_SEND_API_URL   = "https://api.telegram.org/bot%s/sendMessage"
+	defaultTimeout    = 10 * time.Minute
+	maxRetries        = 5
+	retryBaseInterval = 2 * time.Second
 )
 
+const (
+	telegramUpdateAPIURL = "https://api.telegram.org/bot%s/getUpdates"
+	telegramSendAPIURL   = "https://api.telegram.org/bot%s/sendMessage"
+	queryParameter       = "?timeout=30&offset=%d"
+)
+
+var httpClient = &http.Client{
+	Timeout: 40 * time.Second,
+}
+
 type UpdateResponse struct {
+	OK     bool     `json:"ok"`
 	Result []Update `json:"result"`
 }
 
 type Update struct {
-	UpdateID int64   `json:"update_id"`
-	Message  Message `json:"message"`
+	UpdateID int64    `json:"update_id"`
+	Message  *Message `json:"message"`
 }
 
 type Message struct {
@@ -35,79 +44,103 @@ type Message struct {
 }
 
 type SendResponse struct {
+	OK     bool    `json:"ok"`
 	Result Message `json:"result"`
 }
 
+// sendMessage sends a Telegram message and returns the created message object.
 func sendMessage(token, chatID, text string) (Message, error) {
-	form := url.Values{}
+	form := neturl.Values{}
 	form.Add("chat_id", chatID)
 	form.Add("text", text)
 
-	url := fmt.Sprintf(TELEGRAM_SEND_API_URL, token)
-	resp, err := http.PostForm(
-		url,
-		form,
-	)
-	if err != nil {
-		return Message{}, err
-	}
+	endpoint := fmt.Sprintf(telegramSendAPIURL, token)
 
+	resp, err := httpClient.PostForm(endpoint, form)
+	if err != nil {
+		return Message{}, fmt.Errorf("failed to send message: %w", err)
+	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return Message{}, err
+		return Message{}, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return Message{}, fmt.Errorf("sendMessage failed (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	var r SendResponse
-	json.Unmarshal(body, &r)
+	if err := json.Unmarshal(body, &r); err != nil {
+		return Message{}, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !r.OK {
+		return Message{}, fmt.Errorf("telegram API returned error: %s", string(body))
+	}
 
 	return r.Result, nil
 }
 
+// getUpdates retrieves Telegram updates using long polling.
 func getUpdates(token string, offset int64) ([]Update, error) {
-	url := fmt.Sprintf(
-		TELEGRAM_UPDATE_API_URL+queryParameter,
+	endpoint := fmt.Sprintf(
+		telegramUpdateAPIURL+queryParameter,
 		token,
 		offset,
 	)
 
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(endpoint)
 	if err != nil {
 		return nil, err
 	}
-
 	defer resp.Body.Close()
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("getUpdates status=%d body=%s", resp.StatusCode, string(body))
+	}
+
 	var r UpdateResponse
-	json.Unmarshal(body, &r)
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, err
+	}
+
+	if !r.OK {
+		return nil, fmt.Errorf("telegram API error: %s", string(body))
+	}
 
 	return r.Result, nil
 }
 
+// getLatestOffset reads the latest update_id so old messages are ignored.
 func getLatestOffset(token string) int64 {
-	url := fmt.Sprintf(
-		TELEGRAM_UPDATE_API_URL,
-		token,
-	)
+	endpoint := fmt.Sprintf(telegramUpdateAPIURL, token)
 
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(endpoint)
 	if err != nil {
 		return 0
 	}
-
 	defer resp.Body.Close()
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+
 	var r UpdateResponse
-	json.Unmarshal(body, &r)
+	if err := json.Unmarshal(body, &r); err != nil {
+		return 0
+	}
 
 	var offset int64
 	for _, u := range r.Result {
@@ -124,42 +157,60 @@ func main() {
 	chatID := os.Getenv("TELEGRAM_CHAT_ID")
 
 	if token == "" || chatID == "" {
-		fmt.Println("TELEGRAM_TOKEN / TELEGRAM_CHAT_ID required")
+		fmt.Fprintln(os.Stderr, "TELEGRAM_TOKEN / TELEGRAM_CHAT_ID required")
 		os.Exit(1)
 	}
 
-	message := "Claude approval required\n返信: OK / いいえ"
+	message := "Claude approval OK / いいえ"
 	if len(os.Args) > 1 {
 		message = strings.Join(os.Args[1:], " ")
 	}
 
 	offset := getLatestOffset(token)
+
 	sent, err := sendMessage(token, chatID, message)
 	if err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, "sendMessage error:", err)
+		os.Exit(1)
 	}
 
 	fmt.Println("message sent:", sent.MessageID)
 	fmt.Println("waiting for approval...")
 
+	deadline := time.After(defaultTimeout)
+	retryCount := 0
+
 	for {
+		select {
+		case <-deadline:
+			fmt.Println("timeout: no approval received within", defaultTimeout)
+			os.Exit(1)
+		default:
+		}
+
 		updates, err := getUpdates(token, offset)
 		if err != nil {
-			panic(err)
+			retryCount++
+			if retryCount > maxRetries {
+				fmt.Fprintln(os.Stderr, "getUpdates error (retries exhausted):", err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "getUpdates error (retry %d/%d): %v\n", retryCount, maxRetries, err)
+			time.Sleep(retryBaseInterval * time.Duration(retryCount))
+			continue
 		}
+		retryCount = 0
 
 		for _, u := range updates {
 			offset = u.UpdateID + 1
-			msg := u.Message
-			if msg.ReplyToMessage == nil {
+			if u.Message == nil || u.Message.ReplyToMessage == nil {
+				continue
+			}
+			if u.Message.ReplyToMessage.MessageID != sent.MessageID {
 				continue
 			}
 
-			if msg.ReplyToMessage.MessageID != sent.MessageID {
-				continue
-			}
-
-			text := strings.TrimSpace(msg.Text)
+			text := strings.ToUpper(strings.TrimSpace(u.Message.Text))
 			switch text {
 			case "OK":
 				fmt.Println("approved")
