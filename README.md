@@ -60,3 +60,25 @@ export TELEGRAM_CHAT_ID="your-chat-id"
 ## ライセンス
 
 MIT
+
+### 処理の流れ
+```mermaid
+sequenceDiagram
+    participant Claude
+    participant Hook
+    participant CLI
+    participant Telegram
+    participant Watch
+    participant User
+
+    Claude->>Hook: コマンド実行
+    Hook->>CLI: wrist-approval
+    CLI->>Telegram: sendMessage
+    Telegram->>Watch: 通知
+    Watch->>User: approval
+    User->>Watch: OK
+    Watch->>Telegram: reply
+    CLI->>Telegram: getUpdates
+    CLI-->>Hook: exit 0
+    Hook-->>Claude: 実行許可
+```
