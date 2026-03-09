@@ -174,8 +174,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("message sent:", sent.MessageID)
-	fmt.Println("waiting for approval...")
+	fmt.Fprintln(os.Stderr, "message sent:", sent.MessageID)
+	fmt.Fprintln(os.Stderr, "waiting for approval...")
 
 	deadline := time.After(defaultTimeout)
 	retryCount := 0
@@ -183,7 +183,7 @@ func main() {
 	for {
 		select {
 		case <-deadline:
-			fmt.Println("timeout: no approval received within", defaultTimeout)
+			fmt.Fprintln(os.Stderr, "timeout: no approval received within", defaultTimeout)
 			os.Exit(1)
 		default:
 		}
@@ -213,10 +213,10 @@ func main() {
 			text := strings.ToUpper(strings.TrimSpace(u.Message.Text))
 			switch text {
 			case "OK":
-				fmt.Println("approved")
+				fmt.Fprintln(os.Stderr, "approved")
 				os.Exit(0)
 			case "いいえ":
-				fmt.Println("denied")
+				fmt.Fprintln(os.Stderr, "denied")
 				os.Exit(1)
 			}
 		}
