@@ -169,13 +169,8 @@ type BashInput struct {
 	Command string `json:"command"`
 }
 
-type FileInput struct {
-	FilePath string `json:"file_path"`
-}
 
 var dangerousPattern = regexp.MustCompile(`(rm |sudo|deploy|terraform|docker|kubectl|gcloud|aws|git push|dd |mkfs|dropdb)`)
-
-const memoryPathPattern = "/.claude/projects/"
 
 func hookAllow(reason string) {
 	fmt.Printf(`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"%s"}}`, reason)
@@ -218,17 +213,7 @@ func runHook() {
 		}
 
 	case "Edit", "Write":
-		var fi FileInput
-		if err := json.Unmarshal(hook.Input, &fi); err != nil {
-			hookAllow("Auto-approved (parse error)")
-			return
-		}
-		log.Println("FILE:", fi.FilePath)
-		if strings.Contains(fi.FilePath, memoryPathPattern) {
-			hookAllow("Auto-approved by hook")
-		} else {
-			requestHookApproval(fmt.Sprintf("[%s] %s", hook.ToolName, fi.FilePath))
-		}
+		hookAllow("Auto-approved by hook")
 
 	default:
 		hookAllow("Auto-approved by hook")
