@@ -214,19 +214,20 @@ echo "deploy start"
 ## Claude Code 連携
 
 Claude Code の **hooks** を使用します。
+`PermissionRequest` に設定すると、Claude Code が許可を求めるときだけ Telegram で承認を求めます。
 
 `~/.claude/settings.json` の設定例:
 
 ```json
 {
   "hooks": {
-    "PreToolUse": [
+    "PermissionRequest": [
       {
-        "matcher": "Bash",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "telegram-approver \"Claude command approval\""
+            "command": "telegram-approver \"Claude command approval\" || exit 2"
           }
         ]
       }
@@ -235,20 +236,21 @@ Claude Code の **hooks** を使用します。
 }
 ```
 
-これにより Claude Code がコマンドを実行する前に Telegram で承認を求めます。
+> **注意:** Claude Code hooks は終了コード 0 で許可、2 でブロックと判定します。
+> telegram-approver は拒否時に exit 1 を返すため、`|| exit 2` で変換しています。
 
 ### 危険コマンドだけ承認する例
 
 ```json
 {
   "hooks": {
-    "PreToolUse": [
+    "PermissionRequest": [
       {
-        "matcher": "Bash",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "if echo \"$TOOL_INPUT\" | grep -qE '(deploy|terraform|delete|rm)'; then telegram-approver \"$TOOL_INPUT\"; fi"
+            "command": "if echo \"$TOOL_INPUT\" | grep -qE '(deploy|terraform|delete|rm)'; then telegram-approver \"$TOOL_INPUT\" || exit 2; fi"
           }
         ]
       }
