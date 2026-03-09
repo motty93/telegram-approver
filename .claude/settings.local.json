@@ -3,7 +3,9 @@
     "allow": [
       "Bash(go build:*)",
       "WebSearch",
-      "Bash(chmod +x:*)"
+      "Bash(chmod +x:*)",
+      "Bash(touch /tmp/test-hook-trigger.txt)",
+      "Read(//tmp/**)"
     ]
   }
 }
