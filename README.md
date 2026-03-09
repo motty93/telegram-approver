@@ -1,7 +1,7 @@
 # telegram-approver
 
 Telegram Bot API を使った承認フロー CLI ツールです。
-Telegram チャットにメッセージを送信し、ユーザーからの**リプライ**を待って承認・拒否を判定します。
+Telegram チャットにメッセージを送信し、ユーザーからの返信（リプライまたはダイレクトメッセージ）を待って承認・拒否を判定します。
 
 スマートウォッチ（Huawei Band など）の通知から承認できるため、
 **Claude Code のコマンド実行前の承認フロー**として利用できます。
@@ -11,10 +11,10 @@ Telegram チャットにメッセージを送信し、ユーザーからの**リ
 ## 機能
 
 - Telegram に承認メッセージ送信
-- ユーザーのリプライを待機（ロングポーリング）
-- CLI ツールとして利用可能
+- ユーザーの返信を待機（ロングポーリング、リプライ・ダイレクトメッセージ両対応）
+- CLI ツールとしても Claude Code PreToolUse hook としても利用可能
 - 終了コードで承認結果を返す（0=承認, 1=拒否）
-- Claude Code hooks と連携可能
+- hook モード: ツール種別に応じた自動判定（危険コマンド・ファイル編集のみ承認要求）
 - タイムアウト（10分）で自動拒否
 - リトライ機構付き（最大5回、指数バックオフ）
 
@@ -25,22 +25,24 @@ Telegram チャットにメッセージを送信し、ユーザーからの**リ
 ```mermaid
 sequenceDiagram
     participant Claude
-    participant Hook
-    participant CLI
+    participant Approver as telegram-approver hook
     participant Telegram
     participant Watch
     participant User
 
-    Claude->>Hook: コマンド実行
-    Hook->>CLI: telegram-approver
-    CLI->>Telegram: sendMessage
-    Telegram->>Watch: 通知
-    Watch->>User: approval
-    User->>Watch: OK
-    Watch->>Telegram: reply
-    CLI->>Telegram: getUpdates
-    CLI-->>Hook: exit 0
-    Hook-->>Claude: 実行許可
+    Claude->>Approver: PreToolUse (stdin JSON)
+    Approver->>Approver: ツール判定（危険？）
+    alt 安全なコマンド
+        Approver-->>Claude: 自動承認 (exit 0)
+    else 危険コマンド / ファイル編集
+        Approver->>Telegram: sendMessage
+        Telegram->>Watch: 通知
+        Watch->>User: approval
+        User->>Watch: OK
+        Watch->>Telegram: reply / direct message
+        Approver->>Telegram: getUpdates
+        Approver-->>Claude: 承認 (exit 0) / 拒否 (exit 2)
+    end
 ```
 
 ---
@@ -177,12 +179,20 @@ Claude approval OK / いいえ
 telegram-approver "デプロイを承認してください"
 ```
 
+### hook モード（Claude Code 連携）
+
+```bash
+telegram-approver hook
+```
+
+stdin から Claude Code の PreToolUse hook JSON を読み取り、ツール種別に応じて承認判定を行います。
+
 ---
 
 ## 承認フロー
 
 1. Telegram チャットにメッセージ送信
-2. ユーザーが送信されたメッセージに**リプライ**で返信
+2. ユーザーが返信（リプライまたはダイレクトメッセージ）
 3. 返信内容に応じて終了コード返却
 
 | 返信 | 結果 | 終了コード |
@@ -190,7 +200,8 @@ telegram-approver "デプロイを承認してください"
 | `OK` | 承認 | 0 |
 | `いいえ` | 拒否 | 1 |
 
-> **注意:** 通常のメッセージではなく、Bot が送信したメッセージへの**リプライ**が必要です。
+> **注意:** Bot が送信したメッセージへの**リプライ**、または同一チャット内の**ダイレクトメッセージ**のどちらでも承認できます。
+> スマートウォッチのクイックリプライ（`ReplyToMessage` が付かない場合）にも対応しています。
 > `OK` は大文字・小文字を区別しません。
 > 10分以内に返信がない場合はタイムアウトで拒否（exit 1）になります。
 
@@ -213,21 +224,33 @@ echo "deploy start"
 
 ## Claude Code 連携
 
-Claude Code の **hooks** を使用します。
-`PermissionRequest` に設定すると、Claude Code が許可を求めるときだけ Telegram で承認を求めます。
+Claude Code の **PreToolUse hook** として `telegram-approver hook` を使用します。
+ツール種別に応じて自動的に承認要否を判定し、危険な操作のみ Telegram で承認を求めます。
 
-`~/.claude/settings.json` の設定例:
+### hook モード
+
+`telegram-approver hook` は stdin から Claude Code の hook JSON を読み取り、以下のように判定します：
+
+| ツール | 判定 |
+| --- | --- |
+| `Bash` | 危険コマンド（`rm`, `sudo`, `deploy`, `terraform`, `docker`, `kubectl`, `gcloud`, `aws`, `git push`, `dd`, `mkfs`, `dropdb`）→ 承認要求、それ以外 → 自動承認 |
+| `Edit` / `Write` | memory パス（`/.claude/projects/`）→ 自動承認、それ以外 → 承認要求 |
+| その他 | 自動承認 |
+
+### 設定例
+
+`~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "PermissionRequest": [
+    "PreToolUse": [
       {
         "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "telegram-approver \"Claude command approval\" || exit 2"
+            "command": "telegram-approver hook"
           }
         ]
       }
@@ -236,28 +259,8 @@ Claude Code の **hooks** を使用します。
 }
 ```
 
-> **注意:** Claude Code hooks は終了コード 0 で許可、2 でブロックと判定します。
-> telegram-approver は拒否時に exit 1 を返すため、`|| exit 2` で変換しています。
-
-### 危険コマンドだけ承認する例
-
-```json
-{
-  "hooks": {
-    "PermissionRequest": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "if echo \"$TOOL_INPUT\" | grep -qE '(deploy|terraform|delete|rm)'; then telegram-approver \"$TOOL_INPUT\" || exit 2; fi"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+> **注意:** Claude Code の PreToolUse hook は、stdout に JSON を出力して `exit 0` で許可、`exit 2` でブロックと判定します。
+> `telegram-approver hook` はこのプロトコルに直接対応しているため、シェルスクリプトのラッパーは不要です。
 
 ---
 
